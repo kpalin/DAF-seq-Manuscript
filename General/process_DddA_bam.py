@@ -12,53 +12,76 @@ import argparse
 parser = argparse.ArgumentParser(description = "DddA BAM preprocessing",
     epilog = "")
 parser.add_argument("-b", "--bam", required = True, metavar = '', help = "DddA aligned BAM to correct")
-parser.add_argument("-c", "--cutoff", required = False, metavar = '', help = "Strand mut proportion cutoff")
+parser.add_argument("-c", "--sd_cutoff", required = False, default=3., type=float,  help = "Strand mut sigma probability cutoff [default:%(default)g]")
+parser.add_argument(
+        "-V",
+        "--verbose",
+        default=False,
+        action="store_true",
+        help="Be more verbose with output",
+    )
 args = parser.parse_args()
+
+
+import logging
+
+if args.verbose:
+    logging.basicConfig(
+            level=logging.INFO,
+            format="%(message)s",
+    )
+    logging.info(str(args))
+
 
 # identify fastq files in dir
 bam_name = args.bam
-if args.cutoff:
-    cutoff = args.cutoff
-else:
-    cutoff = 0.90
+sd_cutoff = args.sd_cutoff
 
+assert sd_cutoff>0
 
-def determine_da_strand_MD(read_obj, cutoff):
+def determine_da_strand_MD(read_obj, cutoff,do_logging=False):
     # based on the proportion of C->T & G->A determine the strand acted upon by DddA
     # only counting single base substitutions
+    import math 
     seq = read_obj.query_sequence
     pair = read_obj.get_aligned_pairs(matches_only=False, with_seq=True)
     c = 0
     g = 0
     total = 0
-    for pos in pair:
-        if pos[0] == None or pos[1] == None: # indel, ignore
+    #for pos in pair:
+    for qi,ri,ref_base in pair:
+        if qi == None or ri == None: # indel, ignore
             pass
         else:
-            qi = pos[0]
-            ref_pos = pos[2].upper()
-            if seq[qi] != ref_pos:
+            ref_base = ref_base.upper()
+            q_base = seq[qi]
+            if q_base != ref_base:
                 total += 1
-                change = ref_pos + seq[qi]
-                if change == "CT":
-                    c += 1
-                elif change == 'GA':
-                    g += 1
-    if c+g == 0:
-        return('none')
-    elif c/(c+g) >= cutoff:
-        return('CT')
-    elif g/(c+g) >= cutoff:
-        return('GA')
-    else:
-        return('undetermined')
-
+                match (ref_base,q_base):
+                    case ("C","T"):            
+                        c += 1
+                    case ("G","A"):
+                        g += 1
+                        
+    
+    
+    cutoff_N = (c+g)/2 - cutoff*0.5*math.sqrt(c+g)  # 3 sigma below mean.
+    #if c+g == 0:
+    #    return('none')
+    r="undetermined"
+    if g<cutoff_N: #c/(c+g) >= cutoff:
+        r=('CT')
+    elif c<cutoff_N: # g/(c+g) >= cutoff:
+        r=('GA')
+    if do_logging:
+        logging.info("%s:%d %s C:%d G:%d Cp:%g  %s cut:%g",read_obj.reference_name, read_obj.reference_start,read_obj.query_name,c,g,(0. if c+g==0 else c/(c+g)),r,cutoff_N)
+    return r 
 def check_num_assigned(sam_obj, cutoff):
     none = 0
     und = 0
     ct = 0
     ga = 0
-    for read in sam_obj.fetch():
+    for read in sam_obj:
         if read.is_secondary == False and read.is_supplementary == False:
             change = determine_da_strand_MD(read, cutoff)
             if change == 'none':
@@ -104,12 +127,16 @@ def correct_read_MD(read_obj, strand):
 
 
 # write corrected reads to new BAM
-bam = pysam.AlignmentFile(bam_name, "rb")
-new_bam = bam_name.replace('.bam','_corrected.bam')
-corrected_bam = pysam.AlignmentFile(new_bam, "wb", template=bam)
-for read in bam.fetch():
+bam = pysam.AlignmentFile(bam_name, "rb",threads=4)
+
+from pathlib import Path
+new_bam = Path(bam_name).with_suffix(".corrected.bam").name
+assert new_bam!=bam_name
+corrected_bam = pysam.AlignmentFile(new_bam, "wb", template=bam,threads=4)
+i=0
+for read in bam:
     if read.is_secondary == False and read.is_supplementary == False:
-        strand = determine_da_strand_MD(read, cutoff)
+        strand = determine_da_strand_MD(read, sd_cutoff,do_logging=(i%10000)==0)
         MD = read.get_tag('MD')
         if strand in ['CT','GA']:
             # WRITE NEW seq with added tags
@@ -122,5 +149,6 @@ for read in bam.fetch():
         else:
             read.set_tags([('DA', [0]), ('FD', 0, "i"), ('LD', 0, "i"), ('ST', strand),('MD', MD)])
         corrected_bam.write(read)
+        i+=1
 bam.close()
 corrected_bam.close()
