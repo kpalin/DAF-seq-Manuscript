@@ -133,10 +133,11 @@ from pathlib import Path
 new_bam = Path(bam_name).with_suffix(".corrected.bam").name
 assert new_bam!=bam_name
 corrected_bam = pysam.AlignmentFile(new_bam, "wb", template=bam,threads=4)
-i=0
+N_written=0
+N_skipped=0
 for read in bam:
-    if read.is_secondary == False and read.is_supplementary == False:
-        strand = determine_da_strand_MD(read, sd_cutoff,do_logging=(i%10000)==0)
+    if read.is_secondary == False and read.is_supplementary == False and read.has_tag("MD"):
+        strand = determine_da_strand_MD(read, sd_cutoff,do_logging=(N_written%10000)==0)
         MD = read.get_tag('MD')
         if strand in ['CT','GA']:
             # WRITE NEW seq with added tags
@@ -149,6 +150,9 @@ for read in bam:
         else:
             read.set_tags([('DA', [0]), ('FD', 0, "i"), ('LD', 0, "i"), ('ST', strand),('MD', MD)])
         corrected_bam.write(read)
-        i+=1
+        N_written+=1
+    else:
+        N_skipped+=1
 bam.close()
 corrected_bam.close()
+logging.info("Wrote %d reads, skipped %d (%g%%).",N_written,N_skipped,N_skipped/(N_skipped+N_written))
